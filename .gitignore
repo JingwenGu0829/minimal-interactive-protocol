@@ -1,0 +1,7 @@
+data/
+outputs/
+config/live.json
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

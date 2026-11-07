@@ -1,0 +1,16 @@
+{
+  "system": "You are a concise voice assistant. Answer in plain speech.",
+  "services": {
+    "chat": {"base_url": "mock", "model": "mock"},
+    "speech": {"base_url": "mock", "model": "mock"},
+    "transcription": {"base_url": "mock", "model": "mock"}
+  },
+  "speech": {
+    "voice": "alloy",
+    "sample_rate": 24000
+  },
+  "turns": [
+    {"user": "Tell me about Paris in three sentences.", "interrupt_after_ms": 500},
+    {"user": "Sorry, how many people live there?"}
+  ]
+}

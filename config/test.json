@@ -1,0 +1,16 @@
+{
+  "scenario": "test/testdata/interrupt_dialog.json",
+  "sim": {
+    "ms_per_char": 50,
+    "chunk_ms": 200,
+    "synth_speed": 2.0,
+    "llm_first_ms": 300,
+    "llm_sentence_ms": 100,
+    "net_ms": 50,
+    "vad_ms": 100
+  },
+  "out_dir": "outputs/test",
+  "data": {
+    "out_dir": "test/testdata/baseline"
+  }
+}

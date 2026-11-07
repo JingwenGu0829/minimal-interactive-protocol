@@ -1,0 +1,4 @@
+{
+  "keep_entry": {"per_case": {"case/1": "2/4"}, "empty": 2, "samples": 4},
+  "drop_entry": {"per_case": {"case/1": "0/4"}, "empty": 0, "samples": 4}
+}

@@ -1,0 +1,23 @@
+{
+  "scenario": "test/testdata/interrupt_dialog.json",
+  "sim": {
+    "ms_per_char": 50,
+    "chunk_ms": 200,
+    "synth_speed": 2.0,
+    "llm_first_ms": 300,
+    "llm_sentence_ms": 100,
+    "net_ms": 50,
+    "vad_ms": 100
+  },
+  "out_dir": "outputs",
+  "data": {
+    "dataset": "gavinlaw/sglang-omni-fdb-native-runs",
+    "revision": "30843d2df96da214f4c2df9172028617c0541b2a",
+    "out_dir": "data/raw",
+    "files": {
+      "dataset_card.md": "README.md",
+      "cascade_capabilities.json": "a-group-live-20261028/caps-cascade-http.json",
+      "empty_reply_replay.json": "20261022-cascade-unheard-reply-history-replay/summary.json"
+    }
+  }
+}

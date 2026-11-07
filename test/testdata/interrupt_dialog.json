@@ -1,0 +1,21 @@
+{
+  "system": "You are a concise voice assistant.",
+  "turns": [
+    {
+      "user": "What is the capital of France?",
+      "ready_ms": 0,
+      "reply": "Paris is the capital of France."
+    },
+    {
+      "user": "Tell me about it.",
+      "ready_ms": 4000,
+      "reply": "Paris sits on the Seine. It has about two million residents. The Louvre is its most visited museum."
+    },
+    {
+      "user": "Wait, how big is it?",
+      "speech_started_ms": 6500,
+      "ready_ms": 7500,
+      "reply": "It covers about one hundred square kilometers."
+    }
+  ]
+}
