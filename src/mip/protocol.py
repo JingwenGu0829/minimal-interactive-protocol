@@ -69,7 +69,23 @@ class FlushPlayback:
     run_id: int
 
 
-Command = StartGeneration | Synthesize | CancelWork | DeliverAudio | EndOfAudio | FlushPlayback
+@dataclass(frozen=True)
+class CallTool:
+    """Run a tool other than speech. Its result comes back by `call_id`, not by run."""
+
+    run_id: int
+    call_id: str
+    name: str
+    arguments: dict
+
+
+Command = (
+    StartGeneration | Synthesize | CancelWork | DeliverAudio | EndOfAudio | FlushPlayback
+    | CallTool
+)
+
+# In speech-as-a-tool mode the model speaks only by calling this tool.
+SPEAK = "speak"
 
 # An English terminator only ends a sentence once whitespace follows it, so a
 # streamed "3." does not split before its "5" arrives. CJK terminators end one at once.
