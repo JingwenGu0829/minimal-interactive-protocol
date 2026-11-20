@@ -16,8 +16,11 @@ DEFAULT_REPLY = "This is a mock reply. It has two short sentences."
 
 
 class MockAPI:
+    """`replies` holds one entry per chat request: text, or a list of tool calls
+    such as `[{"name": "speak", "arguments": {"text": "Hi."}}]`."""
+
     def __init__(
-        self, replies: list[str] | None = None, transcript: str = "hello",
+        self, replies: list[str | list[dict]] | None = None, transcript: str = "hello",
         ms_per_char: int = 20, sample_rate: int = 24000,
     ):
         self.replies = iter(replies) if replies else itertools.repeat(DEFAULT_REPLY)
@@ -27,6 +30,7 @@ class MockAPI:
         self.chat_requests: list[dict] = []
         self.speech_disconnects = 0
         self._runner: web.AppRunner | None = None
+        self._call_ids = itertools.count(1)
 
     async def start(self) -> str:
         """Start on a free local port and return the base URL."""
@@ -49,8 +53,25 @@ class MockAPI:
         self.chat_requests.append(body)
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await response.prepare(request)
-        for word in next(self.replies).split(" "):
-            event = {"choices": [{"delta": {"content": word + " "}}]}
+        reply = next(self.replies)
+        if isinstance(reply, str):
+            deltas = [{"content": word + " "} for word in reply.split(" ")]
+        else:
+            deltas = []
+            for index, call in enumerate(reply):
+                # Like real APIs: the name first, then the arguments in pieces.
+                arguments = json.dumps(call["arguments"])
+                middle = len(arguments) // 2
+                head = {"name": call["name"], "arguments": arguments[:middle]}
+                call_id = f"call_mock_{next(self._call_ids)}"
+                deltas.append({"tool_calls": [
+                    {"index": index, "id": call_id, "type": "function", "function": head}
+                ]})
+                deltas.append({"tool_calls": [
+                    {"index": index, "function": {"arguments": arguments[middle:]}}
+                ]})
+        for delta in deltas:
+            event = {"choices": [{"delta": delta}]}
             await response.write(f"data: {json.dumps(event)}\n\n".encode())
         await response.write(b"data: [DONE]\n\n")
         await response.write_eof()

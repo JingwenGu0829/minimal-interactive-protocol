@@ -16,8 +16,10 @@ from pathlib import Path
 
 import aiohttp
 
+from . import tools
 from .mock_server import MockAPI
 from .protocol import (
+    CallTool,
     CancelWork,
     Command,
     DeliverAudio,
@@ -93,6 +95,7 @@ class LiveRunner:
         self.speech = speech
         self.player = ClockPlayer(self._playback_stopped)
         self.tasks: dict[int, set[asyncio.Task]] = defaultdict(set)
+        self.tool_tasks: set[asyncio.Task] = set()  # Never cancelled by an interruption.
         self.started_at: dict[int, float] = {}
         self.first_text_ms: dict[int, float] = {}
         self.first_audio_ms: dict[int, float] = {}
@@ -121,6 +124,18 @@ class LiveRunner:
                     self.player.end_of_audio(command.run_id)
                 case FlushPlayback():
                     self.player.flush(command.run_id)
+                case CallTool():
+                    task = asyncio.create_task(self._call_tool(command))
+                    self.tool_tasks.add(task)
+                    task.add_done_callback(self.tool_tasks.discard)
+
+    async def wait_idle(self, timeout_s: float = 60.0) -> None:
+        """Wait until the turn has settled, including any follow-up inference."""
+        deadline = time.monotonic() + timeout_s
+        while not self.session.idle:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"the session was not idle within {timeout_s} s")
+            await asyncio.sleep(0.01)
 
     async def wait_closed(self, run_id: int, timeout_s: float = 60.0) -> None:
         deadline = time.monotonic() + timeout_s
@@ -139,12 +154,24 @@ class LiveRunner:
 
     async def _generate(self, command: StartGeneration) -> None:
         try:
-            async for text in self.chat.stream(list(command.messages)):
+            offered = tools.schemas() if self.session.speech_as_tool else None
+            async for kind, value in self.chat.stream_events(list(command.messages), offered):
                 self.first_text_ms.setdefault(command.run_id, self._elapsed_ms(command.run_id))
-                self.dispatch(self.session.text_delta(command.run_id, text))
+                if kind == "text":
+                    self.dispatch(self.session.text_delta(command.run_id, value))
+                else:
+                    self.dispatch(self.session.tool_call(
+                        command.run_id, value["id"], value["name"], value["arguments"]
+                    ))
             self.dispatch(self.session.generation_done(command.run_id))
         except Exception as error:  # Any service failure must end the run, not hang it.
             self.dispatch(self.session.run_failed(command.run_id, repr(error)))
+
+    async def _call_tool(self, command: CallTool) -> None:
+        tool = tools.TOOLS.get(command.name)
+        await asyncio.sleep((tool.delay_ms if tool else 0) / 1000)
+        result = tools.execute(command.name, command.arguments)
+        self.dispatch(self.session.tool_result(command.call_id, result))
 
     async def _synthesize(self, command: Synthesize) -> None:
         run_id, sentence_id = command.run_id, command.sentence_id
@@ -180,25 +207,29 @@ async def run_dialog(config: dict, out_dir: str | Path | None = None) -> dict:
     A turn gives `user` text, or `audio_path` to transcribe a WAV file first. It may
     set `interrupt_after_ms` to speak over the reply that the turn produces. An optional
     `primitives` object turns protocol primitives off, for example
-    `{"session": false}`.
+    `{"session": false}`. With `"speech_as_tool": true` the chat model is offered the
+    `speak` tool and the toy tools, and must support function calling.
     """
     primitives = Primitives(**config.get("primitives", {}))
+    speech_as_tool = config.get("speech_as_tool", False)
+    system = config["system"] + (" " + tools.SPEAK_INSTRUCTIONS if speech_as_tool else "")
     async with _resolve_mocks(config["services"]) as services, aiohttp.ClientSession() as http:
         chat = OpenAIChat(http, Endpoint(**services["chat"]))
         speech = OpenAISpeech(http, Endpoint(**services["speech"]), **config.get("speech", {}))
         asr = OpenAITranscription(http, Endpoint(**services["transcription"]))
-        session = Session(config["system"], primitives)
+        session = Session(system, primitives, speech_as_tool=speech_as_tool)
         runner = LiveRunner(session, chat, speech)
         for turn in config["turns"]:
             text = turn.get("user")
             if text is None:
                 text = await asr.transcribe(Path(turn["audio_path"]).read_bytes())
             runner.dispatch(session.user_turn_ready(text))
-            run_id = session.latest.run_id
             if "interrupt_after_ms" in turn:
                 await asyncio.sleep(turn["interrupt_after_ms"] / 1000)
                 runner.dispatch(session.user_speech_started())
-            await runner.wait_closed(run_id)
+            await runner.wait_idle()
+        for task in list(runner.tool_tasks):
+            task.cancel()  # The dialog is over; nobody is left to receive the result.
     result = {
         "history": session.history,
         "runs": [
@@ -211,6 +242,10 @@ async def run_dialog(config: dict, out_dir: str | Path | None = None) -> dict:
                 "played_ms": run.played_ms,
                 "planned": [sentence.text for sentence in run.sentences],
                 "heard": run.heard,
+                "calls": [
+                    {"name": call.name, "arguments": call.arguments, "result": call.result}
+                    for call in run.calls
+                ],
                 "fully_played": Session.fully_played(
                     run, runner.player.stopped_ms.get(run.run_id, 0)
                 ),
