@@ -13,12 +13,23 @@ turn and measures what breaks.
 Requires Python 3.11 or newer (tested on 3.11 and 3.14). No GPU, API key, or network
 connection is needed for the tests, once the dependencies are installed.
 
+With [uv](https://docs.astral.sh/uv/), which also installs a suitable Python:
+
+```bash
+uv sync
+uv run python run.py test
+```
+
+Or with pip:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python run.py test
 ```
+
+`uv.lock` and `requirements.txt` pin the same versions.
 
 `python run.py test` takes a few seconds. It runs the unit tests and then the ablation on
 the small test dialog, and writes its results to `outputs/test/`.
