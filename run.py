@@ -4,11 +4,12 @@
 Targets
   test      Unit tests, then ablation and baseline on unit test data. Offline.
   ablation  Remove each protocol primitive in simulation and measure what breaks.
+  tools     The same ablation with speech as a tool call and a slow toy tool.
   data      Download small metadata files from the published benchmark runs.
   baseline  Summarize the downloaded files.
   live      Run config/live.json against OpenAI-compatible endpoints.
   probe     Ask a real chat model what it last said, with primitives removed.
-  all       data, baseline, ablation.
+  all       data, baseline, ablation, tools.
   clean     Delete everything this script builds.
 """
 
@@ -39,6 +40,13 @@ def build_ablation(config: dict) -> None:
     figure = write_timeline(ROOT / config["scenario"], sim_config, ROOT / config["out_dir"])
     print(format_rows(rows))
     print(f"Wrote {table.relative_to(ROOT)} and {figure.relative_to(ROOT)}")
+
+
+def build_tools(config: dict) -> None:
+    rows = run_ablation(ROOT / config["tool_scenario"], SimConfig(**config["sim"]))
+    table = write_rows(rows, ROOT / config["out_dir"], "tool_ablation.csv")
+    print(format_rows(rows))
+    print(f"Wrote {table.relative_to(ROOT)}")
 
 
 def build_data(config: dict) -> None:
@@ -89,13 +97,14 @@ def build_test() -> None:
         sys.exit(1)
     config = load_config("test")
     build_ablation(config)
+    build_tools(config)
     build_baseline(config)
 
 
 def main(targets: list[str]) -> None:
     if not targets:
         sys.exit(__doc__)
-    known = {"test", "ablation", "data", "baseline", "live", "probe", "all", "clean"}
+    known = {"test", "ablation", "tools", "data", "baseline", "live", "probe", "all", "clean"}
     unknown = set(targets) - known
     if unknown:
         sys.exit(f"Unknown targets: {sorted(unknown)}\n{__doc__}")
@@ -112,6 +121,8 @@ def main(targets: list[str]) -> None:
         build_baseline(config)
     if "ablation" in targets or "all" in targets:
         build_ablation(config)
+    if "tools" in targets or "all" in targets:
+        build_tools(config)
     if "live" in targets:
         build_live()
     if "probe" in targets:

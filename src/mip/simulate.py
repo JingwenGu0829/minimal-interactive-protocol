@@ -13,7 +13,9 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import tools
 from .protocol import (
+    CallTool,
     CancelWork,
     Command,
     DeliverAudio,
@@ -114,11 +116,16 @@ class SimPlayer:
 class Simulator:
     def __init__(self, scenario: dict, config: SimConfig, primitives: Primitives):
         self.config = config
-        self.session = Session(scenario["system"], primitives)
+        self.session = Session(
+            scenario["system"], primitives, speech_as_tool=scenario.get("speech_as_tool", False)
+        )
         self.player = SimPlayer(self)
         self.now = 0.0
         self.requests: dict[int, tuple[dict, ...]] = {}
-        self._replies = iter(turn["reply"] for turn in scenario["turns"])
+        self.run_turn: dict[int, int] = {}  # Which scenario turn each run answers.
+        self._turns = scenario["turns"]
+        self._turn_of_user = {turn["user"]: i for i, turn in enumerate(self._turns)}
+        self._inferences: dict[int, int] = defaultdict(int)
         self._cancelled: set[int] = set()
         self._events: list = []
         self._sequence = 0
@@ -167,16 +174,41 @@ class Simulator:
                     self.after(net, self.player.end_of_audio, command.run_id)
                 case FlushPlayback():
                     self.after(net, self.player.flush, command.run_id)
+                case CallTool():
+                    self.after(net, self._call_tool, command)
 
     def _generate(self, command: StartGeneration) -> None:
         self.requests[command.run_id] = command.messages
-        sentences, _ = split_sentences(next(self._replies) + " ")
+        # The scripted model answers the latest user message it was shown.
+        user = next(m["content"] for m in reversed(command.messages) if m["role"] == "user")
+        index = self._turn_of_user[user]
+        self.run_turn[command.run_id] = index
+        turn = self._turns[index]
         delay = self.config.llm_first_ms
-        for sentence in sentences:
-            self.after(delay, self._emit, command.run_id,
-                       self.session.text_delta, sentence + " ")
-            delay += self.config.llm_sentence_ms
+        if "reply" in turn:
+            sentences, _ = split_sentences(turn["reply"] + " ")
+            for sentence in sentences:
+                self.after(delay, self._emit, command.run_id,
+                           self.session.text_delta, sentence + " ")
+                delay += self.config.llm_sentence_ms
+        else:
+            # Speech-as-a-tool: each inference of the turn is a scripted list of calls.
+            scripted = turn["inferences"]
+            number = self._inferences[index]
+            self._inferences[index] += 1
+            calls = scripted[number] if number < len(scripted) else []
+            for position, call in enumerate(calls):
+                call_id = f"call_{command.run_id}_{position}"
+                self.after(delay, self._emit, command.run_id, self.session.tool_call,
+                           call_id, call["name"], call["arguments"])
+                delay += self.config.llm_sentence_ms
         self.after(delay, self._emit, command.run_id, self.session.generation_done)
+
+    def _call_tool(self, command: CallTool) -> None:
+        """Tools are not cancelled by an interruption, so this bypasses `_cancelled`."""
+        delay = tools.TOOLS[command.name].delay_ms + self.config.net_ms
+        result = tools.execute(command.name, command.arguments)
+        self.after(delay, self._input, self.session.tool_result, command.call_id, result)
 
     def _synthesize(self, command: Synthesize) -> None:
         config = self.config
@@ -202,8 +234,11 @@ def interruption_metrics(sim: Simulator, scenario: dict) -> dict:
     index, turn = next(
         (i, t) for i, t in enumerate(scenario["turns"]) if "speech_started_ms" in t
     )
-    # Run ids start at 1, so the reply being interrupted by turn `index` is run `index`.
-    interrupted, next_run = index, index + 1
+    # The interrupted run is the last one whose audio had started; the next reply is
+    # the first run that answers the interrupting turn.
+    started = turn["speech_started_ms"]
+    interrupted = max(run for run, at in sim.player.first_audio.items() if at <= started)
+    next_run = min(run for run, answered in sim.run_turn.items() if answered == index)
     spans = [(start, end) for run, start, end in sim.player.spans if run == interrupted]
     flushed_at = sim.player.flushed_at.get(interrupted)
     stale_ms = 0.0
@@ -211,7 +246,7 @@ def interruption_metrics(sim: Simulator, scenario: dict) -> dict:
         stale_ms = sum(max(0.0, end - max(start, flushed_at)) for start, end in spans)
     truly_heard_chars = sim.player.played_ms(interrupted) / sim.config.ms_per_char
     history_chars = sum(len(text) for text in sim.session.runs[interrupted].heard or [])
-    return {
+    metrics = {
         "stop_latency_ms": max(end for _, end in spans) - turn["speech_started_ms"],
         "stale_audio_ms": stale_ms,
         "unheard_chars_in_history": max(0.0, history_chars - truly_heard_chars),
@@ -219,6 +254,13 @@ def interruption_metrics(sim: Simulator, scenario: dict) -> dict:
         "prior_messages_in_next_request": len(sim.requests[next_run]) - 2,
         "next_reply_delay_ms": sim.player.first_audio[next_run] - turn["ready_ms"],
     }
+    if scenario.get("speech_as_tool"):
+        # Results of tools other than speech that the next request carries.
+        metrics["tool_results_in_next_request"] = sum(
+            message["role"] == "tool" and "status" not in json.loads(message["content"])
+            for message in sim.requests[next_run]
+        )
+    return metrics
 
 
 def run_ablation(scenario_path: str | Path, config: SimConfig) -> list[dict]:
@@ -230,10 +272,10 @@ def run_ablation(scenario_path: str | Path, config: SimConfig) -> list[dict]:
     return rows
 
 
-def write_rows(rows: list[dict], out_dir: str | Path) -> Path:
+def write_rows(rows: list[dict], out_dir: str | Path, name: str = "ablation.csv") -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "ablation.csv"
+    path = out_dir / name
     with path.open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=list(rows[0]))
         writer.writeheader()

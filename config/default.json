@@ -1,5 +1,6 @@
 {
   "scenario": "test/testdata/interrupt_dialog.json",
+  "tool_scenario": "test/testdata/tool_dialog.json",
   "sim": {
     "ms_per_char": 50,
     "chunk_ms": 200,

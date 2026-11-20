@@ -1,0 +1,63 @@
+{
+  "system": "You are a concise voice assistant.",
+  "speech_as_tool": true,
+  "turns": [
+    {
+      "user": "What is the capital of France?",
+      "ready_ms": 0,
+      "inferences": [
+        [
+          {
+            "name": "speak",
+            "arguments": {
+              "text": "Paris is the capital of France."
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "user": "What is the weather there?",
+      "ready_ms": 4000,
+      "inferences": [
+        [
+          {
+            "name": "speak",
+            "arguments": {
+              "text": "Let me check the weather. It should only take a moment. Paris weather changes quickly."
+            }
+          },
+          {
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          }
+        ],
+        [
+          {
+            "name": "speak",
+            "arguments": {
+              "text": "It is 18 degrees and cloudy in Paris."
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "user": "Just the temperature, please.",
+      "speech_started_ms": 6500,
+      "ready_ms": 7500,
+      "inferences": [
+        [
+          {
+            "name": "speak",
+            "arguments": {
+              "text": "It is 18 degrees."
+            }
+          }
+        ]
+      ]
+    }
+  ]
+}
