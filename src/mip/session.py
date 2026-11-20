@@ -7,13 +7,22 @@ the resulting events back in.
 The design adapts ideas from the SGLang-Omni interactive runtime: persistent sessions,
 response identity that invalidates work in flight, and history based on playback
 (https://www.sglang.io/blog/omni-interactive-runtime). No SGLang-Omni code is used.
+
+With `speech_as_tool=True` the model speaks by calling a `speak` tool instead of
+writing text. An interruption then closes that one tool call, and what the user heard
+comes back to the model as the call's result. Other tools are not cancelled by an
+interruption: their results are addressed by call id and land in the history whenever
+they arrive.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from .protocol import (
+    SPEAK,
+    CallTool,
     CancelWork,
     Command,
     DeliverAudio,
@@ -37,9 +46,21 @@ class Sentence:
     synth_done: bool = False
 
 
+RUNNING = json.dumps({"status": "running"})  # Placeholder until a tool's result arrives.
+
+
+@dataclass
+class ToolCall:
+    call_id: str
+    name: str
+    arguments: dict
+    result: str | None = None  # Each call gets exactly one result.
+    message: dict | None = None  # Its tool message, once it is in the history.
+
+
 @dataclass
 class Run:
-    """One reply, from the generation request to its unique terminal state."""
+    """One model inference and the speech it produces, up to a unique terminal state."""
 
     run_id: int
     state: RunState = RunState.RUNNING
@@ -53,11 +74,25 @@ class Run:
     played_ms: float | None = None
     # None means unknown; [] means confirmed that nothing was heard.
     heard: list[str] | None = None
+    # Speech-as-a-tool mode only.
+    calls: list[ToolCall] = field(default_factory=list)
+    speak: ToolCall | None = None
+    text: str = ""  # Plain text the model wrote. It is never spoken.
 
 
 class Session:
-    def __init__(self, system_prompt: str, primitives: Primitives = Primitives()):
+    def __init__(
+        self,
+        system_prompt: str,
+        primitives: Primitives = Primitives(),
+        speech_as_tool: bool = False,
+        max_inferences: int = 4,
+    ):
         self.primitives = primitives
+        self.speech_as_tool = speech_as_tool
+        self.max_inferences = max_inferences  # Per user turn, so a turn cannot loop.
+        self._inferences = 0
+        self._call_runs: dict[str, Run] = {}
         self.history: list[dict] = [{"role": "system", "content": system_prompt}]
         self.runs: dict[int, Run] = {}
         self.latest: Run | None = None
@@ -118,10 +153,44 @@ class Session:
         run = self._event_run(run_id)
         if run is None:
             return []
+        if self.speech_as_tool:
+            run.text += text
+            return []
         run.tail += text
         complete, run.tail = split_sentences(run.tail)
         self._add_sentences(run, complete)
         return self._next_synthesis(run)
+
+    def tool_call(self, run_id: int, call_id: str, name: str, arguments: dict) -> list[Command]:
+        """The model called a tool. `speak` starts speech; anything else is dispatched."""
+        run = self._event_run(run_id)
+        if run is None:
+            return []
+        call = ToolCall(call_id, name, arguments)
+        run.calls.append(call)
+        if name != SPEAK:
+            self._call_runs[call_id] = run
+            return [CallTool(run.run_id, call_id, name, arguments)]
+        if run.speak is not None:
+            # One speech at a time: a second call must not silently replace the first.
+            call.result = json.dumps({"status": "failed", "error": "BUSY"})
+            return []
+        run.speak = call
+        sentences, tail = split_sentences(str(arguments.get("text", "")) + " ")
+        self._add_sentences(run, sentences + ([tail.strip()] if tail.strip() else []))
+        return self._next_synthesis(run)
+
+    def tool_result(self, call_id: str, content: str) -> list[Command]:
+        """A tool finished. The result is kept even if its turn was interrupted."""
+        run = self._call_runs.get(call_id)
+        call = next((c for c in run.calls if c.call_id == call_id), None) if run else None
+        if call is None or call.result is not None:
+            self.rejected_events += 1
+            return []
+        call.result = content
+        if call.message is not None:
+            call.message["content"] = content  # Replace the running placeholder.
+        return self._continue_turn(self.latest)
 
     def generation_done(self, run_id: int) -> list[Command]:
         run = self._event_run(run_id)
@@ -174,15 +243,91 @@ class Session:
         return run
 
     def _start_run(self) -> list[Command]:
-        for text in self._pending_users:
-            self.history.append({"role": "user", "content": text})
-        current_user = self.history[-1]
-        self._pending_users.clear()
+        """Start an inference: for the queued user turns, or as a follow-up in a turn."""
+        if self._pending_users:
+            for text in self._pending_users:
+                self.history.append({"role": "user", "content": text})
+            self._pending_users.clear()
+            self._inferences = 0
+        self._inferences += 1
         run = Run(run_id=len(self.runs) + 1)
         self.runs[run.run_id] = run
         self.latest = run
-        messages = self.history if self.primitives.session else [self.history[0], current_user]
-        return [StartGeneration(run.run_id, tuple(messages))]
+        messages = self.history
+        if not self.primitives.session:
+            # Without a session, the model sees only the current turn.
+            last_user = max(i for i, m in enumerate(self.history) if m["role"] == "user")
+            messages = [self.history[0]] + self.history[last_user:]
+        # Copies, so a result that arrives later cannot rewrite a request already sent.
+        return [StartGeneration(run.run_id, tuple(dict(m) for m in messages))]
+
+    @property
+    def idle(self) -> bool:
+        """True when nothing is running and no follow-up inference is on its way."""
+        run = self.latest
+        if run is None:
+            return True
+        waiting = self._wants_follow_up(run) and not self._results_in(run)
+        return run.state is RunState.CLOSED and not self._pending_users and not waiting
+
+    def _wants_follow_up(self, run: Run) -> bool:
+        """The model called a tool other than speech and finished speaking normally."""
+        return (
+            self.speech_as_tool
+            and run.end_reason is EndReason.COMPLETED
+            and any(call.name != SPEAK for call in run.calls)
+            and self._inferences < self.max_inferences
+        )
+
+    @staticmethod
+    def _results_in(run: Run) -> bool:
+        return all(call.result is not None for call in run.calls)
+
+    def _continue_turn(self, run: Run | None) -> list[Command]:
+        if run is None or run is not self.latest or run.state is not RunState.CLOSED:
+            return []
+        if self._pending_users:
+            return self._start_run()
+        if self._wants_follow_up(run) and self._results_in(run):
+            return self._start_run()
+        return []
+
+    def _record_calls(self, run: Run, reason: EndReason, heard: list[str] | None) -> None:
+        """Write the inference into the history as tool calls and their results.
+
+        The speak call keeps its full text. What was heard goes into its result, so
+        the record of what the model wrote and the fact of what played stay separate.
+        """
+        if not run.calls:
+            return
+        if run.speak is not None:
+            if reason is EndReason.FAILED:
+                result = {"status": "failed", "error": run.error}
+            elif heard is None:
+                result = {"status": "failed", "error": "playback position unknown"}
+            elif reason is EndReason.COMPLETED:
+                result = {"status": "completed"}
+            else:
+                result = {"status": "interrupted", "heard_prefix": " ".join(heard)}
+            run.speak.result = json.dumps(result)
+        self.history.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call.call_id,
+                        "type": "function",
+                        "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
+                    }
+                    for call in run.calls
+                ],
+            }
+        )
+        for call in run.calls:
+            content = call.result if call.result is not None else RUNNING
+            call.message = {"role": "tool", "tool_call_id": call.call_id, "content": content}
+            self.history.append(call.message)
 
     @staticmethod
     def _add_sentences(run: Run, texts: list[str]) -> None:
@@ -244,6 +389,8 @@ class Session:
         run.heard = heard
         # A reply nobody heard leaves no entry. An empty assistant message is not
         # neutral: see the empty-reply replay reported by the `baseline` target.
-        if heard:
+        if self.speech_as_tool:
+            self._record_calls(run, reason, heard)
+        elif heard:
             self.history.append({"role": "assistant", "content": " ".join(heard)})
-        return self._start_run() if self._pending_users else []
+        return self._continue_turn(run)
