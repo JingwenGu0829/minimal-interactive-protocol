@@ -68,15 +68,49 @@ row, the model invented a sentence it never said. This is one prompt on one mode
 shows a direction rather than a failure rate. Whether the effects hold on recorded speech
 is the question for the rest of the quarter.
 
+## Speech as a tool (early)
+
+Setting `"speech_as_tool": true` changes how the model speaks: instead of writing text
+that is always read aloud, it calls a `speak` tool. The four primitives stay the same,
+but they now act on a tool call:
+
+- An interruption closes the `speak` call. The model is not asked first.
+- The call keeps the full text the model wrote. Its result says what happened:
+  `{"status": "completed"}`, or `{"status": "interrupted", "heard_prefix": "..."}`.
+- Other tools are not cancelled by an interruption. Their results are addressed by
+  call id, so a result that arrives after the user cut in still lands in the history.
+- A result that arrives while the agent is speaking waits until the speech ends.
+
+Two toy tools exercise this: `get_weather` (slow, 2.5 s) and `multiply` (instant).
+`python run.py tools` repeats the ablation on a dialog where the user interrupts while
+the weather lookup is still running:
+
+| Removed primitive | Stop latency (ms) | Stale audio (ms) | Unheard chars in history | Prior messages in next request | Next reply delay (ms) | Tool results in next request |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| none | 150 | 0 | 0 | 7 | 650 | 1 |
+| `cancel` | 2350 | 0 | 0 | 7 | 2050 | 1 |
+| `run_identity` | 400 | 200 | 0 | 7 | 650 | 1 |
+| `playback_progress` | 150 | 0 | 44 | 7 | 650 | 1 |
+| `session` | 150 | 0 | 0 | 0 | 650 | 0 |
+
+As above, these are simulated timings. Each removal still causes its own failure, and
+the weather result survives the interruption in every row that keeps the session.
+`test/test_tools.py` checks the values by hand. This mode has not been run against a
+real chat model yet; it needs one that supports function calling.
+
+One simplification: the model is called again within a turn only when it used a tool
+other than `speak`. A turn that only speaks ends when the speech ends.
+
 ## All build targets
 
 | Command | What it does | Needs |
 | --- | --- | --- |
 | `python run.py test` | Unit tests, then ablation and baseline on unit test data | Nothing beyond `requirements.txt` |
 | `python run.py ablation` | Writes `outputs/ablation.csv` and `outputs/ablation_timeline.svg` | Nothing beyond `requirements.txt` |
+| `python run.py tools` | Writes `outputs/tool_ablation.csv` for speech-as-a-tool mode | Nothing beyond `requirements.txt` |
 | `python run.py data` | Downloads three small files to `data/raw/` | Network |
 | `python run.py baseline` | Summarizes them into `outputs/baseline.json` | `data` target |
-| `python run.py all` | `data`, `baseline`, and `ablation` | Network |
+| `python run.py all` | `data`, `baseline`, `ablation`, and `tools` | Network |
 | `python run.py live` | Runs one conversation from `config/live.json` | That file, plus keys for any real endpoints |
 | `python run.py probe` | Writes `outputs/probe.json` from 30 conversations | That file, plus keys for any real endpoints |
 | `python run.py clean` | Deletes `outputs/` and `data/` | Nothing |
@@ -140,6 +174,7 @@ src/mip/protocol.py     Primitives, run states, commands, sentence splitting.
 src/mip/session.py      The coordinator. The only place conversation state changes.
 src/mip/simulate.py     Deterministic simulator and the ablation.
 src/mip/figures.py      Draws the ablation as a timeline.
+src/mip/tools.py        The `speak` tool schema and two toy tools.
 src/mip/services.py     HTTP adapters for chat, speech, and transcription.
 src/mip/live.py         Runs the same session over real HTTP in real time.
 src/mip/probe.py        Tests the session and playback progress primitives on a real model.
@@ -161,7 +196,8 @@ and is needed only as one possible endpoint, which the protocol reaches over HTT
 Turn detection is outside this protocol: the caller reports when the user starts
 speaking and when a turn is ready. So far, all four primitives have been evaluated on one
 scripted dialog in simulation, and two of them on one prompt with one real chat model.
-Tool calling is planned for Quarter 2.
+Speech as a tool and two toy tools work in simulation and against the mock server; they
+have not been evaluated on a real model.
 
 ## Attribution
 
